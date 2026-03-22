@@ -6,6 +6,7 @@ from groq import Groq
 
 from app.config import settings
 from app.dependencies import get_current_user
+from app.verifier import check_syntax, run_symbolic_verifier
 
 router = APIRouter(prefix="/ai", tags=["AI"])
 
@@ -63,9 +64,9 @@ class ChatResponse(BaseModel):
 
 
 # ─── System prompts ──────────────────────────────────────────
-ANALYZE_SYSTEM = """You are HintHive AI, an expert code analyser and mentor.
+ANALYZE_SYSTEM = """You are HintHive AI, a Socratic programming tutor.
 
-When given a code snippet and its programming language, analyse it carefully and return a JSON object with this exact structure:
+When given a code snippet, its programming language, and optionally a verification counter-example, return a JSON object with this exact structure:
 
 {
   "summary": "One-sentence overall verdict.",
@@ -76,29 +77,27 @@ When given a code snippet and its programming language, analyse it carefully and
       "severity": "error|warning|info|success",
       "line": null_or_integer,
       "title": "Short title",
-      "message": "Clear explanation of the issue",
-      "fix": "Exact fix or corrected code snippet",
+      "message": "Socratic question pointing to the issue without giving the solution",
+      "fix": "",
       "icon": "one emoji"
     }
   ]
 }
 
 Rules:
-- Detect ALL syntax errors (missing semicolons, brackets, colons, indentation errors, typos, etc.)
-- Detect logic errors (off-by-one, infinite loops, wrong conditions, unreachable code, etc.)
-- Detect performance issues (O(n^2) loops, unnecessary re-computation, missing memoisation, etc.)
-- Detect style/best-practice issues (magic numbers, bad variable names, var vs const, etc.)
-- If the code is perfect, return one hint with type "success" and severity "success".
+- You are a TEACHER, not a judge. The code correctness has already been judged mathematically.
+- If a counter-example is provided, explain the proven mistake and ask Socratic questions.
+- NEVER give the direct solution or fix. The user must fix their own bugs. Let "fix" be empty or just a hint.
 - Always set "line" to the actual line number when the issue is on a specific line, else null.
-- Keep "fix" concise and show corrected code where possible.
 - Return ONLY the raw JSON object, no markdown, no explanation outside the JSON.
 """
 
-CHAT_SYSTEM = """You are HintHive AI, a friendly and expert coding mentor.
+CHAT_SYSTEM = """You are HintHive AI, a Socratic programming tutor.
 
 You are helping a developer who is writing code in {language}. Their current code is shown below.
-Answer their question helpfully, clearly, and concisely. When showing code, use proper formatting.
-Be encouraging and educational — explain WHY something is wrong, not just what.
+Answer their questions helpfully, but NEVER give the direct solution or correct code snippet.
+Instead, ask Socratic questions to guide them to find the answer themselves.
+Explain WHY something is wrong, and help them reason about the logic.
 
 Current code:
 ```{language}
@@ -126,11 +125,47 @@ async def analyze_code(
             summary="No code to analyse."
         )
 
-    prompt = (
-        f"Language: {body.language}\n\n"
-        f"Code:\n```{body.language.lower()}\n{body.code}\n```\n\n"
-        "Analyse the code above and return the JSON response."
-    )
+    if body.language.lower() in ["python", "py"]:
+        syntax = check_syntax(body.code)
+        if not syntax["valid"]:
+            return AnalyzeResponse(
+                hints=[HintItem(
+                    id="syntax-error", type="syntax", severity="error", line=syntax["line"],
+                    title="Syntax Error",
+                    message=syntax["error"],
+                    fix="Fix the syntax error.", icon="🚨"
+                )],
+                summary="Code has a syntax error caught by parser."
+            )
+            
+        verification = run_symbolic_verifier(body.code)
+        if verification["verified"]:
+            return AnalyzeResponse(
+                hints=[HintItem(
+                    id="success", type="success", severity="success", line=None,
+                    title="Mathematically Verified!",
+                    message="Your code passed symbolic execution and is mathematically correct.",
+                    fix="", icon="✅"
+                )],
+                summary="Code is logically proven."
+            )
+            
+        # If counter-example is found, ask the AI to formulate Socratic question based on it
+        prompt = (
+            f"Language: {body.language}\n\n"
+            f"Code:\n```{body.language.lower()}\n{body.code}\n```\n\n"
+            f"The symbolic verifier found the following counter-example (a bug):\n"
+            f"{verification['counter_example']}\n\n"
+            "As a Socratic AI Tutor, analyze this proven mistake and formulate JSON hints teaching the user "
+            "about their logical error. DO NOT provide the correct code. DO ask questions to guide them."
+        )
+    else:
+        # Fallback for other languages
+        prompt = (
+            f"Language: {body.language}\n\n"
+            f"Code:\n```{body.language.lower()}\n{body.code}\n```\n\n"
+            "Analyse the code above and return the JSON response using your heuristic logic."
+        )
 
     try:
         completion = get_groq().chat.completions.create(

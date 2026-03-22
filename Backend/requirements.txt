@@ -9,3 +9,8 @@ python-multipart==0.0.20
 pydantic[email]==2.11.1
 pydantic-settings==2.8.1
 groq>=0.11.0
+crosshair-tool>=0.0.75
+z3-solver>=4.13.0
+langchain>=0.3.0
+langgraph>=0.2.16
+mutmut>=2.4.5
